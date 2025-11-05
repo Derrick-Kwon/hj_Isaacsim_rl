@@ -28,8 +28,9 @@ from rirolab_tasks.tasks.direct.inhand_manipulation.inhand_manipulation_env impo
 
 from .feature_extractor import FeatureExtractor, FeatureExtractorCfg
 from .shadow_hand_lite_env_cfg import ShadowHandLiteEnvCfg
-
 import rirolab_tasks.tasks
+
+
 
 @configclass
 class ShadowHandLiteVisionEnvCfg(ShadowHandLiteEnvCfg):
@@ -119,10 +120,6 @@ class ShadowHandLiteVisionEnv(InHandManipulationEnv):
         # add lights
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
-
-
-
-
 
 
     def _compute_image_observations(self):

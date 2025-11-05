@@ -12,30 +12,73 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import isaaclab.sim as sim_utils
-from isaaclab.assets import Articulation, RigidObject
+from isaaclab.assets import Articulation, RigidObject, DeformableObject
 from isaaclab.envs import DirectRLEnv
 from isaaclab.markers import VisualizationMarkers
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.math import quat_conjugate, quat_from_angle_axis, quat_mul, sample_uniform, saturate
 from isaaclab.managers import RecorderManager
 
+
+
+
 if TYPE_CHECKING:
     # from isaaclab_tasks.direct.allegro_hand.allegro_hand_env_cfg import AllegroHandEnvCfg
     from rirolab_tasks.tasks.direct.shadow_hand_lite.shadow_hand_lite_env_cfg import ShadowHandLiteEnvCfg
 
-
-class InHandManipulationEnv(DirectRLEnv):
+class InHandManipulationDeformEnv(DirectRLEnv):
     cfg: ShadowHandLiteEnvCfg
 
     def __init__(self, cfg: ShadowHandLiteEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
 
+        ## set deformable object physical parameters here if needed ##
+        env_ids = torch.arange(self.num_envs).reshape(-1, 1) # Shape: [num_envs, 1]
+        if hasattr(self.cfg, "youngs_modulus"):
+            youngs_modulus = torch.full((self.num_envs, ), self.cfg.youngs_modulus) # Shape: [num_envs, 1]
+            self.scene.deformable_objects['deformable_object'].material_physx_view.set_youngs_modulus(youngs_modulus, env_ids)
+        if hasattr(self.cfg, "damping"):
+            damping = torch.full((self.num_envs, ), self.cfg.damping) # Shape: [num_envs, 1]
+            self.scene.deformable_objects['deformable_object'].material_physx_view.set_damping(damping, env_ids)
+        if hasattr(self.cfg, "dynamic_friction"):
+            dynamic_friction = torch.full((self.num_envs, ), self.cfg.dynamic_friction) # Shape: [num_envs, 1]
+            self.scene.deformable_objects['deformable_object'].material_physx_view.set_dynamic_friction(dynamic_friction, env_ids)
+        if hasattr(self.cfg, "damping_scale"):
+            damping_scale = torch.full((self.num_envs, ), self.cfg.damping_scale) # Shape: [num_envs, 1]
+            self.scene.deformable_objects['deformable_object'].material_physx_view.set_damping_scale(damping_scale, env_ids)
+        if hasattr(self.cfg, "poisson_ratio"):
+            poissons_ratio = torch.full((self.num_envs, ), self.cfg.poisson_ratio) # Shape: [num_envs, 1]
+            self.scene.deformable_objects['deformable_object'].material_physx_view.set_poissons_ratio(poissons_ratio, env_ids)
+        ##############################################################
+
+
+
         self.num_hand_dofs = self.hand.num_joints
 
+        ############################################################################################################
+        default_world_pos = self.deform_obj.data.default_nodal_state_w[..., :3].clone() # Shape: [B, N, 3]
+        default_centroid = torch.mean(default_world_pos, dim=1, keepdim=True) # Shape: [B, 1, 3] #
+        self.default_vertices_local = default_world_pos - default_centroid # Shape: [B, N, 3] # SVD를 위한 local 좌표계로 변환(중심점 기준)
+        # self.reset_goal_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+
+        # --- SVD 결과를 저장 Tensor 생성 ---
+        self.current_object_pos = torch.zeros((self.num_envs, 3), dtype=torch.float, device=self.device) # 현재 물체 위치
+        self.current_object_rot = torch.zeros((self.num_envs, 4), dtype=torch.float, device=self.device) # 현재 물체 회전 (쿼터니언)
+        self.current_object_rot[:, 3] = 1.0 # (x,y,z,w) 순서로 w=1 초기화
+
+        # used to compare object position
+        # self.in_hand_pos = self.object.data.default_root_state[:, 0:3].clone()
+        # self.in_hand_pos[:, 2] -= 0.04
+
+        self.in_hand_pos = default_centroid.squeeze(1) - self.scene.env_origins[env_ids].squeeze(1)  # <--(B, 3) 형태로 변경 / SVD의 중심점 (goal point comparison 용)
+        self.in_hand_pos[:, 2] -= 0.04 # z 약간 아래로 보정, SVD와 비교하는 용으로 goal point 정의
+
+        ############################################################################################################
+
         # buffers for position targets
-        self.hand_dof_targets = torch.zeros((self.num_envs, self.num_hand_dofs), dtype=torch.float, device=self.device)
-        self.prev_targets = torch.zeros((self.num_envs, self.num_hand_dofs), dtype=torch.float, device=self.device)
-        self.cur_targets = torch.zeros((self.num_envs, self.num_hand_dofs), dtype=torch.float, device=self.device)
+        self.hand_dof_targets = torch.zeros((self.num_envs, self.num_hand_dofs), dtype=torch.float, device=self.device) #buffer for hand dof targets
+        self.prev_targets = torch.zeros((self.num_envs, self.num_hand_dofs), dtype=torch.float, device=self.device) #buffer for previous hand dof targets
+        self.cur_targets = torch.zeros((self.num_envs, self.num_hand_dofs), dtype=torch.float, device=self.device) #buffer for current hand dof targets
 
         # list of actuated joints
         self.actuated_dof_indices = list()
@@ -57,14 +100,14 @@ class InHandManipulationEnv(DirectRLEnv):
 
         # track goal resets
         self.reset_goal_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        # used to compare object position
-        self.in_hand_pos = self.object.data.default_root_state[:, 0:3].clone()
-        self.in_hand_pos[:, 2] -= 0.04
+
+
         # default goal positions
         self.goal_rot = torch.zeros((self.num_envs, 4), dtype=torch.float, device=self.device)
         self.goal_rot[:, 0] = 1.0
         self.goal_pos = torch.zeros((self.num_envs, 3), dtype=torch.float, device=self.device)
         self.goal_pos[:, :] = torch.tensor([-0.2, -0.45, 0.68], device=self.device)
+        
         # initialize goal marker
         self.goal_markers = VisualizationMarkers(self.cfg.goal_object_cfg)
 
@@ -80,22 +123,49 @@ class InHandManipulationEnv(DirectRLEnv):
         self.recorder_manager = None
         if hasattr(self.cfg, "recorders") and self.cfg.recorders is not None:
             self.recorder_manager = RecorderManager(self.cfg.recorders, self)
-
         self.success_counter = 0
+
+
+
+    # def DeformableCalculations(self):
+    #     """
+    #     Additional calculation for deformable object handling.
+    #     """
+    #     current_vertices = self.deform_obj.data.point_pos_w # Shape: [B, N, 3]
+    #     initial_vertices = self.deform_obj.data.default_point_pos_w # Shape: [B, N, 3]
+
+
+    #     current_centroid = torch.mean(current_vertices, dim=1, keepdim=True)
+    #     current_vertices_local = current_vertices - current_centroid
+
+    #     transform = corresponding_points_alignment(
+    #         self.default_vertices_local, 
+    #         current_vertices_local, 
+    #         allow_scaling=False
+    #     )
+    #     R_curr = transform.R  # Shape: [B, 3, 3]
+    #     return 
+
+
 
     def _setup_scene(self):
         # add hand, in-hand object, and goal object
         self.hand = Articulation(self.cfg.robot_cfg)
-        self.object = RigidObject(self.cfg.object_cfg)
+
+        # self.object = RigidObject(self.cfg.object_cfg) #Rigid object
+        self.deform_obj = DeformableObject(self.cfg.deformable_object_cfg) # Deformable object ################################ deform object emdfhr
+
         # add ground plane
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
         # clone and replicate (no need to filter for this environment)
         self.scene.clone_environments(copy_from_source=False)
         # add articulation to scene - we must register to scene to randomize with EventManager
         self.scene.articulations["robot"] = self.hand
-        self.scene.rigid_objects["object"] = self.object
+
+        # self.scene.rigid_objects["object"] = self.object
+        self.scene.deformable_objects["deformable_object"] = self.deform_obj ################################ deform object emdfhr
+
         # add lights
-        
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
@@ -216,23 +286,61 @@ class InHandManipulationEnv(DirectRLEnv):
         self._reset_target_pose(env_ids)
 
         # reset object
-        object_default_state = self.object.data.default_root_state.clone()[env_ids]
-        pos_noise = sample_uniform(-1.0, 1.0, (len(env_ids), 3), device=self.device)
-        # global object positions
-        object_default_state[:, 0:3] = (
-            object_default_state[:, 0:3] + self.cfg.reset_position_noise * pos_noise + self.scene.env_origins[env_ids]
-        )
+        # object_default_state = self.object.data.default_root_state.clone()[env_ids]
+        # change shape [1, max_sim_vertices_per_body, 6] into [num_envs, max_sim_vertices_per_body, 6] by stacking
+        # object_default_state = self.deform_obj.data.default_nodal_state_w.clone().unsqueeze(0).repeat(len(env_ids), 1, 1) # Shape: [num_envs, N, 6]
+        # object_default_state = self.deform_obj.data.default_nodal_state_w.clone().squeeze() #### deform object [B, N, 6]
+        object_default_state = self.deform_obj.data.default_nodal_state_w.clone()[env_ids] #### deform object [B, N, 6]
 
-        rot_noise = sample_uniform(-1.0, 1.0, (len(env_ids), 2), device=self.device)  # noise for X and Y rotation
-        object_default_state[:, 3:7] = randomize_rotation(
-            rot_noise[:, 0], rot_noise[:, 1], self.x_unit_tensor[env_ids], self.y_unit_tensor[env_ids]
-        )
+        pos_noise = sample_uniform(-1.0, 1.0, (len(env_ids), 3), device=self.device) # noise for position
+        """
+        default_root_state(rigid body)
 
-        object_default_state[:, 7:] = torch.zeros_like(self.object.data.default_root_state[env_ids, 7:])
-        self.object.write_root_pose_to_sim(object_default_state[:, :7], env_ids)
-        self.object.write_root_velocity_to_sim(object_default_state[:, 7:], env_ids) # zero velocity delete
+        Default root state ``[pos, quat, lin_vel, ang_vel]`` in local environment frame. Shape is (num_instances, 13).       
+            The position and quaternion are of the rigid body's actor frame. Meanwhile, the linear and angular velocities are
+            of the center of mass frame.
+        """
 
-        # reset hand
+        """
+
+        default_nodal_state_w(deformable body)
+        Default nodal state ``[nodal_pos, nodal_vel]`` in simulation world frame.
+        Shape is (num_instances, max_sim_vertices_per_body, 6).
+
+        """
+        #position noise 적용 + env origin 더해주기
+        # object_default_state[..., :3] = (
+        #     object_default_state[..., :3] 
+        #     + self.cfg.reset_position_noise * pos_noise.unsqueeze(1)  # position noise
+        #     + self.scene.env_origins[env_ids].unsqueeze(1)  # global position offset(origin)
+        # )
+        object_default_state[..., :3] = (
+            object_default_state[..., :3] # (max_sim_vertices_per_body, 3)
+            + self.cfg.reset_position_noise * pos_noise.unsqueeze(1)  # position noise (len(env_ids), 3)
+            # + self.scene.env_origins[env_ids].unsqueeze(1)  # global position offset(origin) (len(env_ids), 3
+        ) 
+        #속도를 0으로 초기화
+        object_default_state[..., 3:] = torch.zeros_like(object_default_state[..., 3:])
+
+        #rotation noise for Rigid body
+        #rot_noise = sample_uniform(-1.0, 1.0, (len(env_ids), 2), device=self.device)  # noise for X and Y rotation
+        # object_default_state[:, 3:7] = randomize_rotation(
+        #     rot_noise[:, 0], rot_noise[:, 1], self.x_unit_tensor[env_ids], self.y_unit_tensor[env_ids]
+        # )
+
+        # reset deformable object state
+        self.deform_obj.write_nodal_state_to_sim(object_default_state, env_ids)
+        
+      
+      
+        """
+        self.write_nodal_pos_to_sim(nodal_state[..., :3], env_ids=env_ids)
+        self.write_nodal_velocity_to_sim(nodal_state[..., 3:], env_ids=env_ids)
+        """
+
+
+
+        # reset hand (그대로 두기)
         delta_max = self.hand_dof_upper_limits[env_ids] - self.hand.data.default_joint_pos[env_ids]
         delta_min = self.hand_dof_lower_limits[env_ids] - self.hand.data.default_joint_pos[env_ids]
 
@@ -262,7 +370,6 @@ class InHandManipulationEnv(DirectRLEnv):
         new_rot = randomize_rotation(
             rand_floats[:, 0], rand_floats[:, 1], self.x_unit_tensor[env_ids], self.y_unit_tensor[env_ids]
         )
-
         # update goal pose and markers
         self.goal_rot[env_ids] = new_rot
         goal_pos = self.goal_pos + self.scene.env_origins
@@ -281,13 +388,49 @@ class InHandManipulationEnv(DirectRLEnv):
 
         self.hand_dof_pos = self.hand.data.joint_pos
         self.hand_dof_vel = self.hand.data.joint_vel
+      
+#########################################################################################3
+        # 1. 실제 변형체의 현재 정점 정보
+        current_vertices = self.deform_obj.data.nodal_pos_w # Shape: [B, N, 3]
+        
+        # 2. 현재 중심점 및 중심화된 정점
+        current_centroid = torch.mean(current_vertices, dim=1, keepdim=True)
+        current_vertices_local = current_vertices - current_centroid
+
+        # 3. SVD로 현재 회전(R_curr) 계산 (JIT 함수 호출)
+        # (기본 자세 -> 현재 자세로의 회전)
+        R_curr = compute_rotation_from_svd(
+            self.default_vertices_local, 
+            current_vertices_local
+        ) # Shape: [B, 3, 3]
+        
+        # 4. 회전 행렬을 쿼터니언으로 변환 (JIT 함수 호출)
+        q_curr_xyzw = matrix_to_quaternion_xyzw(R_curr) # Shape: [B, 4] (x, y, z, w)
+
+        # 5. 원본 변수에 SVD 결과 덮어쓰기
+        self.object_pos = current_centroid.squeeze(1) - self.scene.env_origins
+        self.object_rot = q_curr_xyzw
+        
+        # 속도 정보는 DeformableObject의 root_vel_w를 그대로 사용
+        self.object_velocities = self.deform_obj.data.root_vel_w
+        current_nodal_vel = self.deform_obj.data.nodal_vel_w  # Shape: [B, N, 3]
+        self.object_linvel = torch.mean(current_nodal_vel, dim=1) # Shape: [B, 3]
+
+
+        self.object_angvel = torch.zeros_like(self.object_linvel) # Shape: [B, 3]
+
+        # (self.object_velocities는 원본에서도 사용되지 않는 변수이므로 무시해도..., 
+        #  굳이 채우자면 linvel과 angvel을 합쳐줍.)
+        self.object_velocities = torch.cat([self.object_linvel, self.object_angvel], dim=-1)
+
+#########################################################################################3
 
         # data for object
-        self.object_pos = self.object.data.root_pos_w - self.scene.env_origins
-        self.object_rot = self.object.data.root_quat_w
-        self.object_velocities = self.object.data.root_vel_w
-        self.object_linvel = self.object.data.root_lin_vel_w
-        self.object_angvel = self.object.data.root_ang_vel_w
+        # self.object_pos = self.object.data.root_pos_w - self.scene.env_origins
+        # self.object_rot = self.object.data.root_quat_w
+        # self.object_velocities = self.object.data.root_vel_w
+        # self.object_linvel = self.object.data.root_lin_vel_w
+        # self.object_angvel = self.object.data.root_ang_vel_w
 
     def compute_reduced_observations(self):
         # Per https://arxiv.org/pdf/1808.00177.pdf Table 2
@@ -303,6 +446,7 @@ class InHandManipulationEnv(DirectRLEnv):
             ),
             dim=-1,
         )
+
         return obs
 
     def compute_full_observations(self):
@@ -507,6 +651,94 @@ def rotation_distance(object_rot, target_rot):
     quat_diff = quat_mul(object_rot, quat_conjugate(target_rot))
     return 2.0 * torch.asin(torch.clamp(torch.norm(quat_diff[:, 1:4], p=2, dim=-1), max=1.0))  # changed quat convention
 
+
+@torch.jit.script
+def compute_rotation_from_svd(P_src: torch.Tensor, P_tgt: torch.Tensor) -> torch.Tensor:
+    """
+    SVD(Kabsch 알고리즘)를 사용하여 P_src를 P_tgt에 정렬하는
+    최적의 회전 행렬 R을 계산 (JIT 호환)
+
+    Args:
+        P_src: 소스 점 구름 (중심점이 0이어야 함) (Shape: [B, N, 3])
+        P_tgt: 타겟 점 구름 (중심점이 0이어야 함) (Shape: [B, N, 3])
+
+    Returns:
+        회전 행렬 R (Shape: [B, 3, 3])
+    """
+    
+    # 1. 공분산 행렬 H = P_src_T * P_tgt
+    H = torch.bmm(P_src.transpose(1, 2), P_tgt) # Shape: [B, 3, 3]
+
+    # 2. SVD 수행: H = U * S * V_T
+    # torch.linalg.svd는 V가 아닌 V_T를 반환합니다.
+    U, S, V_T = torch.linalg.svd(H) # V_T Shape: [B, 3, 3]
+
+    # 3. 최적의 회전 행렬 R = V * U_T
+    # V = V_T.transpose(1, 2)
+    R = torch.bmm(V_T.transpose(1, 2), U.transpose(1, 2)) # Shape: [B, 3, 3]
+
+    # 4. [중요] 반사(Reflection) 보정
+    # R의 행렬식(determinant)이 -1이 되는 경우 (반전된 경우)를 방지
+    det_R = torch.linalg.det(R) # Shape: [B]
+    
+    # det_R < 0 인 envs에 대해 V_T의 마지막 행의 부호를 뒤집음
+    V_T_new = V_T.clone()
+    V_T_new[:, -1, :] *= torch.sign(det_R).unsqueeze(-1)
+    
+    # 보정된 최적 회전 행렬
+    R_no_reflect = torch.bmm(V_T_new.transpose(1, 2), U.transpose(1, 2))
+
+    return R_no_reflect
+
+@torch.jit.script
+def matrix_to_quaternion_xyzw(matrix: torch.Tensor) -> torch.Tensor:
+    """
+    회전 행렬을 (x, y, z, w) 순서의 쿼터니언으로 변환 (JIT 호환)
+    (Pytorch3D의 matrix_to_quaternion 대체)
+    """
+    B = matrix.shape[0]
+    q = torch.empty((B, 4), dtype=matrix.dtype, device=matrix.device)
+
+    M = matrix.reshape(B, 3, 3)
+    trace = M[:, 0, 0] + M[:, 1, 1] + M[:, 2, 2]
+
+    # w 계산
+    q[:, 3] = 0.5 * torch.sqrt(torch.clamp(1.0 + trace, min=0.0))
+
+    # x 계산
+    q[:, 0] = 0.5 * torch.sqrt(torch.clamp(1.0 + M[:, 0, 0] - M[:, 1, 1] - M[:, 2, 2], min=0.0))
+    q[:, 0] = q[:, 0] * torch.sign(M[:, 2, 1] - M[:, 1, 2])
+
+    # y 계산
+    q[:, 1] = 0.5 * torch.sqrt(torch.clamp(1.0 - M[:, 0, 0] + M[:, 1, 1] - M[:, 2, 2], min=0.0))
+    q[:, 1] = q[:, 1] * torch.sign(M[:, 0, 2] - M[:, 2, 0])
+
+    # z 계산
+    q[:, 2] = 0.5 * torch.sqrt(torch.clamp(1.0 - M[:, 0, 0] - M[:, 1, 1] + M[:, 2, 2], min=0.0))
+    q[:, 2] = q[:, 2] * torch.sign(M[:, 1, 0] - M[:, 0, 1])
+
+    # 수치적 안정성을 위해 가장 큰 성분을 먼저 계산하는 것이 좋으나,
+    # 이 구현이 더 간단하고 JIT에서 잘 작동합니다.
+    # (w, x, y, z) -> (x, y, z, w) 순서 확인
+    
+    # 더 안정적인 TF3D/Pytorch3D 방식 (JIT 호환)
+    m00, m01, m02 = M[:, 0, 0], M[:, 0, 1], M[:, 0, 2]
+    m10, m11, m12 = M[:, 1, 0], M[:, 1, 1], M[:, 1, 2]
+    m20, m21, m22 = M[:, 2, 0], M[:, 2, 1], M[:, 2, 2]
+
+    w_sq = 0.25 * (1.0 + trace)
+    w = torch.sqrt(torch.clamp(w_sq, min=0.0))
+
+    x_sq = w_sq - 0.5 * (m11 + m22)
+    x = torch.sqrt(torch.clamp(x_sq, min=0.0)) * torch.sign(m21 - m12)
+
+    y_sq = w_sq - 0.5 * (m00 + m22)
+    y = torch.sqrt(torch.clamp(y_sq, min=0.0)) * torch.sign(m02 - m20)
+
+    z_sq = w_sq - 0.5 * (m00 + m11)
+    z = torch.sqrt(torch.clamp(z_sq, min=0.0)) * torch.sign(m10 - m01)
+
+    return torch.stack([x, y, z, w], dim=-1)
 
 @torch.jit.script
 def compute_rewards(

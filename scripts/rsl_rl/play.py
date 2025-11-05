@@ -113,7 +113,9 @@ def eval_success_rate(env, ppo_runner, episodes=50):
             done_eps += 1
             # success_count = info["is_success"]
             success_count += 1
+            
             print(f"[EVAL] {done_eps}/{episodes} episodes, {success_count}/{done_eps} successes", end="\r")
+            
 
         elif done_mask.any():
             done_eps += 1
@@ -123,8 +125,9 @@ def eval_success_rate(env, ppo_runner, episodes=50):
             print(f"[EVAL] {done_eps}/{episodes} episodes, {success_count}/{done_eps} successes", end="\r")
 
     # sr = float(np.mean(success_flags)) if success_flags else 0.0
-    
+    print("-----------------------------------------------")
     print(f"[EVAL] episodes={done_eps} success_rate={success_count}/{done_eps}")
+    print("-----------------------------------------------")
     return success_count / done_eps if done_eps > 0 else 0.0
 
 #########################3##############################
