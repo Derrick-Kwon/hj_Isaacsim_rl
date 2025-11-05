@@ -393,7 +393,7 @@ class InHandManipulationDeformEnv(DirectRLEnv):
       
 #########################################################################################3
         # 1. 실제 변형체의 현재 정점 정보
-        current_vertices = self.deform_obj.data.nodal_pos_w # Shape: [B, N, 3]
+        current_vertices = self.deform_obj.data.nodal_pos_w # Shape: [B, N, 3] 
         
         # 2. 현재 중심점 및 중심화된 정점
         current_centroid = torch.mean(current_vertices, dim=1, keepdim=True)

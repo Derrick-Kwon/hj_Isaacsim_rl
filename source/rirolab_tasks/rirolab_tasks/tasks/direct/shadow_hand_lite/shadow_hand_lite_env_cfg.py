@@ -973,7 +973,7 @@ class ShadowHandLiteEnvTeddybearCfg(ShadowHandLiteEnvCfg):
                 max_depenetration_velocity=1000.0,
             ),
             mass_props=sim_utils.MassPropertiesCfg(density=500.0),
-            scale=(0.003, 0.003, 0.003) #for Teddy Bear
+            scale=(0.0027, 0.0027, 0.0027) #for Teddy Bear
         ),
         init_state=DeformableObjectCfg.InitialStateCfg(pos=[-0.01, -0.23, 0.55], rot=[1.0, 0.0, 0.0, 0.0]), #wxyz
     )
@@ -1006,7 +1006,7 @@ class ShadowHandLiteEnvTeddybearCfg(ShadowHandLiteEnvCfg):
         markers={
             "goal": sim_utils.UsdFileCfg(
                 usd_path=f"{LOCAL_ASSETS_DIR}/objects/Props/teddy_bear.usd",
-                scale=(0.003, 0.003, 0.003) #for Teddy Bear
+                scale=(0.0027, 0.0027, 0.0027) #for Teddy Bear
             )
         },
     )
@@ -1023,7 +1023,7 @@ class ShadowHandLiteEnvTeddybearCfg(ShadowHandLiteEnvCfg):
 
     # reward scales
     dist_reward_scale = -1.0   #-10.0 -> -5.0 # distance from palm to object
-    rot_reward_scale = 100.0   #1.0 -> 5
+    rot_reward_scale = 30.0   #1.0 -> 5
     rot_eps = 0.2 #0.1 -> 0.3
 
     action_penalty_scale = -0.0001  #*0.0002->0.0003 #more movement?
