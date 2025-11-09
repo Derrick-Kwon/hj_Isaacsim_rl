@@ -207,6 +207,8 @@ gym.register(
     },
 )
 
+
+
 # gym.register(
 #     id="Riro-Repose-Cube-Shadow-Lite-Vision-Direct-Play-v0",
 #     entry_point=f"{__name__}.shadow_hand_lite_vision_env:ShadowHandLiteVisionEnv",

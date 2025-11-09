@@ -17,7 +17,7 @@ except ModuleNotFoundError:
     from pxr import Semantics
 
 import isaaclab.sim as sim_utils
-from isaaclab.assets import Articulation, RigidObject
+from isaaclab.assets import Articulation, RigidObject, DeformableObject
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import TiledCamera, TiledCameraCfg
 from isaaclab.utils import configclass
@@ -25,6 +25,8 @@ from isaaclab.utils.math import quat_apply
 
 # from isaaclab_tasks.direct.inhand_manipulation.inhand_manipulation_env import InHandManipulationEnv, unscale
 from rirolab_tasks.tasks.direct.inhand_manipulation.inhand_manipulation_env import InHandManipulationEnv, unscale
+from rirolab_tasks.tasks.direct.inhand_manipulation.inhand_manipulation_deform_env import InHandManipulationDeformEnv, unscale
+
 
 from .feature_extractor import FeatureExtractor, FeatureExtractorCfg
 from .shadow_hand_lite_env_cfg import ShadowHandLiteEnvCfg

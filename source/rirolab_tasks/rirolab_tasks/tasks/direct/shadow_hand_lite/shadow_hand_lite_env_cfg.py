@@ -21,6 +21,13 @@ from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.utils.noise import GaussianNoiseCfg, NoiseModelWithAdditiveBiasCfg
 from rirolab_assets import LOCAL_ASSETS_DIR
 
+from isaaclab.assets import ArticulationCfg, AssetBaseCfg, DeformableObjectCfg #GeometryObjectCfg, softObject
+from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg, GroundPlaneCfg
+# import rirolab_tasks.tasks.direct.inhand_manipulation
+
+from isaaclab.sim.spawners.materials import DeformableBodyMaterialCfg
+# from isaaclab.sim.spawners.physics import DeformableBodyPropertiesCfg
+import torch
 @configclass
 class EventCfg:
     """Configuration for randomization."""
@@ -127,6 +134,8 @@ class ShadowHandLiteEnvCfg(DirectRLEnvCfg):
     state_space = 0
     asymmetric_obs = False
     obs_type = "full"
+    # num_stack_frames: int = 4
+
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
@@ -143,7 +152,11 @@ class ShadowHandLiteEnvCfg(DirectRLEnvCfg):
     # robot
     robot_cfg: ArticulationCfg = SHADOW_HAND_LITE_CFG.replace(prim_path="/World/envs/env_.*/Robot").replace(
         init_state=ArticulationCfg.InitialStateCfg(
-            pos=(0.0, 0.0, 0.5),
+            # pos=(0.0, 0.0, 0.5),
+            # rot=(1.0, 0.0, 0.0, 0.0),
+            # joint_pos={".*": 0.0},
+
+            pos=(0.0, 0.0, -1000.0),
             rot=(1.0, 0.0, 0.0, 0.0),
             joint_pos={".*": 0.0},
         )
@@ -176,7 +189,7 @@ class ShadowHandLiteEnvCfg(DirectRLEnvCfg):
         spawn=sim_utils.UsdFileCfg(
             # usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd",
             # usd_path=f"{LOCAL_ASSETS_DIR}/objects/Props/007_tuna_fish_can.usd",
-            usd_path=f"{LOCAL_ASSETS_DIR}/objects/Props/spam_tex.usd",
+            usd_path=f"{LOCAL_ASSETS_DIR}/objects/Props/teddybear_tex.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 kinematic_enabled=False,
                 disable_gravity=False,
@@ -304,6 +317,7 @@ class ShadowHandLiteEnvLemonCfg(ShadowHandLiteEnvCfg):
             )
         },
     )
+    
     # reset
     #rt​= wdist​⋅rdist​​​+(회전) 일치 wrot​⋅rrot​​​+행동 L2 패널티 wact​⋅ract​​​+성공 보너스 breach​⋅1{dt​<success_tolerance 
 
@@ -699,6 +713,7 @@ class ShadowHandLiteEnvBowlCfg(ShadowHandLiteEnvCfg):
         },
     )
     
+       # reset
     #rt​= wdist​⋅rdist​​​+(회전) 일치 wrot​⋅rrot​​​+행동 L2 패널티 wact​⋅ract​​​+성공 보너스 breach​⋅1{dt​<success_tolerance 
 
     # reset_position_noise = 0.01  # range of position at reset
@@ -930,9 +945,9 @@ class ShadowHandLiteEnvBulbCfg(ShadowHandLiteEnvCfg):
     vel_obs_scale = 0.2
     # success_tolerance = 0.1 # for dexcube
     # success_tolerance = 0.60 #30 degrees sodp 
-    # success_tolerance = 0.35 #20 degrees sodp 
+    success_tolerance = 0.35 #20 degrees sodp 
 
-    success_tolerance = 1.0 #100 degrees sodp 
+    # success_tolerance = 1.0 #100 degrees sodp 
 
     # max_consecutive_success = 0
     max_consecutive_success = 10
@@ -954,23 +969,25 @@ class ShadowHandLiteEnvTeddybearCfg(ShadowHandLiteEnvCfg):
             deformable_props=sim_utils.DeformableBodyPropertiesCfg(
                 # enable_gravity=True,
                 # use_mass_scaling=False,
-                solver_position_iteration_count=100,
+                solver_position_iteration_count=32,
                 vertex_velocity_damping=1.0,
                 settling_threshold=0.05,
                 sleep_damping=10.0,
                 self_collision=True,
-                simulation_hexahedral_resolution=10,
+                simulation_hexahedral_resolution=7,
                 collision_simplification=True,
                 sleep_threshold=0.005,
-                max_depenetration_velocity=1000.0,
+                max_depenetration_velocity=100.0,
             ),
             mass_props=sim_utils.MassPropertiesCfg(density=500.0),
             scale=(0.0027, 0.0027, 0.0027) #for Teddy Bear
         ),
-        init_state=DeformableObjectCfg.InitialStateCfg(pos=[-0.01, -0.23, 0.55], rot=[1.0, 0.0, 0.0, 0.0]), #wxyz
+        # init_state=DeformableObjectCfg.InitialStateCfg(pos=[-0.01, -0.23, 0.55], rot=[1.0, 0.0, 0.0, 0.0]), #wxyz
+
+        init_state=DeformableObjectCfg.InitialStateCfg(pos=[-0.01, -0.23, 0.05], rot=(0.0, 0.0, 0.0, 1.0)), #wxyz for test
     )
 
-    decimation = 3
+    decimation = 20
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 120,
         render_interval=decimation,
@@ -983,15 +1000,19 @@ class ShadowHandLiteEnvTeddybearCfg(ShadowHandLiteEnvCfg):
         #     gpu_max_rigid_contact_count=2**23,
         #     gpu_max_rigid_patch_count=2**23,
         # ),
+        physx=PhysxCfg(
+            gpu_max_soft_body_contacts=2**20,
+            gpu_collision_stack_size=2**26
+        ),
     )
 
     # set deformable object properties
-    youngs_modulus = 6.0e5   # 500,000 정도. 1e6까지 올려도 됨
-    damping = 0.01           # 출렁임 줄이기 위해 0~0.002 사이
+    youngs_modulus = 0.9e5   # 500,000 정도. 1e6까지 올려도 됨
+    damping = 0.002          # 출렁임 줄이기 위해 0~0.002 사이
     damping_scale = 0.2      # 전체 damping 효과는 약간만
     poisson_ratio = 0.25     # 0.2~0.3 사이면 자연스럽고 과도한 부피보존은 안 함
     dynamic_friction = 0.5   # 이건 그대로 둬도 됨
-
+   # print(f"object_rot: {object_rot.tolist()}")
     # goal object
     goal_object_cfg: VisualizationMarkersCfg = VisualizationMarkersCfg(
         prim_path="/Visuals/goal_marker",
@@ -1002,30 +1023,35 @@ class ShadowHandLiteEnvTeddybearCfg(ShadowHandLiteEnvCfg):
             )
         },
     )
-    
+
+    # ground_plane: GroundPlaneCfg = GroundPlaneCfg() # object orientation test용 코드
+
+
+
     # scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=8192, env_spacing=0.75, replicate_physics=False)
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=8192, env_spacing=0.75, replicate_physics=False)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=2049, env_spacing=0.75, replicate_physics=False)
 
     #rt​= wdist​⋅rdist​​​+(회전) 일치 wrot​⋅rrot​​​+행동 L2 패널티 wact​⋅ract​​​+성공 보너스 breach​⋅1{dt​<success_tolerance 
     # reset_position_noise = 0.01  # range of position at reset
     #손바닥에 갇혀있는경우 
-    reset_position_noise = 0.0
+    reset_position_noise = 0.0001
     reset_dof_pos_noise = 0.2  # range of dof pos at reset
     reset_dof_vel_noise = 0.0  # range of dof vel at reset
 
     # reward scales
-    dist_reward_scale = -1.0   #-10.0 -> -5.0 # distance from palm to object
-    rot_reward_scale = 30.0   #1.0 -> 5
+    dist_reward_scale = -3   #-10.0 -> -5.0 # distance from palm to object
+    rot_reward_scale = 10.0  #1.0 -> 5
     rot_eps = 0.2 #0.1 -> 0.3
 
-    action_penalty_scale = -0.0001  #*0.0002->0.0003 #more movement?
+    action_penalty_scale = -0.00007 #*0.0002->0.0003 #more movement?
 
-    reach_goal_bonus = 250
-    fall_penalty = -100
-    fall_dist = 0.24
+    reach_goal_bonus = 200
+    fall_penalty = -10 
+    # fall_dist = 0.24
+    fall_dist = 100
     vel_obs_scale = 0.2
     # success_tolerance = 0.1 # for dexcube
-    success_tolerance = 0.50 #30 degrees sodp 
+    success_tolerance = 0.5 #30 degrees sodp 
     # success_tolerance = 0.35 #20 degrees sodp 
     # success_tolerance = 0.18 #10 degrees sodp 
 
@@ -1053,6 +1079,8 @@ class ShadowHandLiteOpenAIEnvCfg(ShadowHandLiteEnvCfg):
             static_friction=1.0,
             dynamic_friction=1.0,
         ),
+
+
         physx=PhysxCfg(
             bounce_threshold_velocity=0.2,
             gpu_max_rigid_contact_count=2**23,
@@ -1089,3 +1117,20 @@ class ShadowHandLiteOpenAIEnvCfg(ShadowHandLiteEnvCfg):
         noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.002, operation="add"),
         bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.0001, operation="abs"),
     )
+    def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
+        self._compute_intermediate_values()
+
+        # reset when cube has fallen
+        goal_dist = torch.norm(self.object_pos - self.in_hand_pos, p=2, dim=-1)
+        out_of_reach = goal_dist >= self.cfg.fall_dist
+
+
+        #torch.isfinite()는 NaN과 Inf를 모두 감지
+        # object_pos의 모든 차원(x,y,z)이 유효한지 확인
+        is_pos_valid = torch.all(torch.isfinite(self.object_pos), dim=-1) 
+        # object_linvel의 모든 차원(x,y,z)이 유효한지 확인
+        is_vel_valid = torch.all(torch.isfinite(self.object_linvel), dim=-1)
+        
+        simulation_exploded = torch.logical_not(is_pos_valid & is_vel_valid)
+        # 물체가 떨어졌거나, 시뮬레이션이 폭발했다면 리셋
+        terminations = out_of_reach | simulation_exploded

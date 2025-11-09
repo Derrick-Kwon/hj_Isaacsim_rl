@@ -19,7 +19,7 @@ from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.math import quat_conjugate, quat_from_angle_axis, quat_mul, sample_uniform, saturate
 from isaaclab.managers import RecorderManager
 
-
+import gymnasium as gym
 
 
 if TYPE_CHECKING:
@@ -51,11 +51,6 @@ class InHandManipulationDeformEnv(DirectRLEnv):
             poissons_ratio = torch.full((self.num_envs, ), self.cfg.poisson_ratio) # Shape: [num_envs, 1]
             self.scene.deformable_objects['deformable_object'].material_physx_view.set_poissons_ratio(poissons_ratio, env_ids)
 
-        ################################################################################################################################
-
-        self.num_hand_dofs = self.hand.num_joints
-
-        ################################################################################################################################
 
         default_world_pos = self.deform_obj.data.default_nodal_state_w[..., :3].clone() # Shape: [B, N, 3]
         default_centroid = torch.mean(default_world_pos, dim=1, keepdim=True) # Shape: [B, 1, 3] #
@@ -67,15 +62,17 @@ class InHandManipulationDeformEnv(DirectRLEnv):
         self.current_object_rot = torch.zeros((self.num_envs, 4), dtype=torch.float, device=self.device) # 현재 물체 회전 (쿼터니언)
         self.current_object_rot[:, 0] = 1.0 # (x,y,z,w) 순서로 w=1 초기화  --> wxyz 로 바꿔줘야함 (1,0,0,0)
 
-        # used to compare object position
-        # self.in_hand_pos = self.object.data.default_root_state[:, 0:3].clone()
-        # self.in_hand_pos[:, 2] -= 0.04
+
+        # config의 rot이 [w, x, y, z] 순서라고 가정합니다.
+        init_rot_wxyz = self.cfg.deformable_object_cfg.init_state.rot
+        self.init_object_rot = torch.tensor(init_rot_wxyz, dtype=torch.float, device=self.device).repeat(self.num_envs, 1)
+
 
         self.in_hand_pos = default_centroid.squeeze(1) - self.scene.env_origins[env_ids].squeeze(1)  # <--(B, 3) 형태로 변경 / SVD의 중심점 (goal point comparison 용)
         self.in_hand_pos[:, 2] -= 0.04 # z 약간 아래로 보정, SVD와 비교하는 용으로 goal point 정의
 
         ################################################################################################################################
-
+        self.num_hand_dofs = self.hand.num_joints
         # buffers for position targets
         self.hand_dof_targets = torch.zeros((self.num_envs, self.num_hand_dofs), dtype=torch.float, device=self.device) #buffer for hand dof targets
         self.prev_targets = torch.zeros((self.num_envs, self.num_hand_dofs), dtype=torch.float, device=self.device) #buffer for previous hand dof targets
@@ -125,6 +122,8 @@ class InHandManipulationDeformEnv(DirectRLEnv):
             self.recorder_manager = RecorderManager(self.cfg.recorders, self)
         self.success_counter = 0
 
+        ################################################################################################
+        
 
 
     # def DeformableCalculations(self):
@@ -154,7 +153,7 @@ class InHandManipulationDeformEnv(DirectRLEnv):
 
         # self.object = RigidObject(self.cfg.object_cfg) #Rigid object
         self.deform_obj = DeformableObject(self.cfg.deformable_object_cfg) # Deformable object ################################ deform object emdfhr
-
+        
         # add ground plane
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
         # clone and replicate (no need to filter for this environment)
@@ -215,6 +214,7 @@ class InHandManipulationDeformEnv(DirectRLEnv):
             observations = {"policy": obs, "critic": states}
         return observations
 
+
     def _get_rewards(self) -> torch.Tensor:
         (
             total_reward,
@@ -260,6 +260,17 @@ class InHandManipulationDeformEnv(DirectRLEnv):
         # reset when cube has fallen
         goal_dist = torch.norm(self.object_pos - self.in_hand_pos, p=2, dim=-1)
         out_of_reach = goal_dist >= self.cfg.fall_dist
+
+
+        #torch.isfinite()는 NaN과 Inf를 모두 감지
+        # object_pos의 모든 차원(x,y,z)이 유효한지 확인
+        is_pos_valid = torch.all(torch.isfinite(self.object_pos), dim=-1) 
+        # object_linvel의 모든 차원(x,y,z)이 유효한지 확인
+        is_vel_valid = torch.all(torch.isfinite(self.object_linvel), dim=-1)
+        
+        simulation_exploded = torch.logical_not(is_pos_valid & is_vel_valid)
+        # 물체가 떨어졌거나, 시뮬레이션이 폭발했다면 리셋
+        terminations = out_of_reach | simulation_exploded
 
         if self.cfg.max_consecutive_success > 0:
             # Reset progress (episode length buf) on goal envs if max_consecutive_success > 0
@@ -326,10 +337,6 @@ class InHandManipulationDeformEnv(DirectRLEnv):
         #속도를 0으로 초기화
         object_default_state[..., 3:] = torch.zeros_like(object_default_state[..., 3:])
 
-
-
-
-
         #rotation noise for Rigid body
         #rot_noise = sample_uniform(-1.0, 1.0, (len(env_ids), 2), device=self.device)  # noise for X and Y rotation
         # object_default_state[:, 3:7] = randomize_rotation(
@@ -370,6 +377,8 @@ class InHandManipulationDeformEnv(DirectRLEnv):
 
         if self.recorder_manager is not None:
             self.recorder_manager.reset(env_ids)
+
+
 
     def _reset_target_pose(self, env_ids):
         # reset goal rotation
@@ -413,12 +422,13 @@ class InHandManipulationDeformEnv(DirectRLEnv):
         ) # Shape: [B, 3, 3]
         
         # 4. 회전 행렬을 쿼터니언으로 변환 (JIT 함수 호출)
-        q_curr_wxyz = matrix_to_quaternion_wxyz(R_curr) # Shape: [B, 4] (w, x, y, z)
+        q_curr_relative_wxyz = matrix_to_quaternion_wxyz(R_curr) # Shape: [B, 4] (w, x, y, z)
 
+        self.object_rot = quat_mul(q_curr_relative_wxyz, self.init_object_rot) # Shape: [B, 4] (w, x, y, z)  # 초기 회전 보정 적용
+        
         # 5. 원본 변수에 SVD 결과 덮어쓰기
         self.object_pos = current_centroid.squeeze(1) - self.scene.env_origins
-        self.object_rot = q_curr_wxyz  # (w, x, y, z) 순서로 저장
-        
+       
         # 속도 정보는 DeformableObject의 root_vel_w를 그대로 사용
         # ... (속도 계산 부분은 그대로) ...
         current_nodal_vel = self.deform_obj.data.nodal_vel_w  # Shape: [B, N, 3]
@@ -770,7 +780,9 @@ def compute_rewards(
     rot_dist = rotation_distance(object_rot, target_rot)
 
 
-    print(f"rot_dist: {rot_dist*180.0/3.1415926}, object_rot: {object_rot}, target_rot: {target_rot}")
+    # print(f"rot_dist: {rot_dist*180.0/3.1415926}, object_rot: {object_rot}, target_rot: {target_rot}")
+
+    # print(f"object_rot: {object_rot}")
 
 
     dist_rew = goal_dist * dist_reward_scale
